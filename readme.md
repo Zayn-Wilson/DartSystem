@@ -18,7 +18,7 @@ DartSystem/
 ├── video/ # 视频保存文件夹
 ├── serial_communication.py # 串口通信模块
 └── readme.md # 项目说明文档
-
+111
 ## 主要功能
 
 1. **绿色光点检测**：使用HSV颜色空间和形态学操作精确识别绿色光点
