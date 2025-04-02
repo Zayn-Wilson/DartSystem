@@ -1,0 +1,430 @@
+import cv2
+import numpy as np
+from collections import deque
+
+class KalmanFilter1D:
+    def __init__(self):
+        self.kalman = cv2.KalmanFilter(2, 1)
+        self.kalman.measurementMatrix = np.array([[1., 0.]], np.float32)
+        self.kalman.transitionMatrix = np.array([[1., 1.], [0., 1.]], np.float32)
+        self.kalman.processNoiseCov = np.array([[1e-3, 0.], [0., 1e-3]], np.float32)
+        self.kalman.measurementNoiseCov = np.array([[1e-2]], np.float32)
+        self.initialized = False
+
+    def update(self, measurement):
+        if not self.initialized:
+            if measurement is None:
+                return 0  # 如果未初始化且没有测量值，返回0
+            self.kalman.statePre = np.array([[measurement], [0.]], np.float32)
+            self.initialized = True
+            return measurement
+
+        prediction = self.kalman.predict()
+        if measurement is not None:
+            correction = self.kalman.correct(np.array([[measurement]], np.float32))
+            return correction[0, 0]
+        return prediction[0, 0]
+
+class GreenLightDetector:
+    def __init__(self, history_size=3):
+        self.offset_history = deque(maxlen=history_size)
+        self.kalman_filter = KalmanFilter1D()
+        self.last_valid_offset = 0
+        self.lost_count = 0
+        self.MAX_LOST_FRAMES = 5
+        self.weight_matrix = None
+        # 增加最近有效检测的历史记录
+        self.recent_detections = deque(maxlen=10)
+        # 添加亮度阈值
+        self.brightness_threshold = 200
+        # 保存上一帧检测到的位置信息
+        self.last_valid_position = None
+        # 初始化有效HSV计数器
+        self.hsv_range_samples = []
+        self.max_samples = 100
+        # 预览掩码和结果
+        self.debug_mask = None
+        self.debug_result = None
+
+    def create_weight_matrix(self, frame):
+        height, width = frame.shape[:2]
+        weight_matrix = np.ones((height, width))
+        
+        # 更加强调上半部分区域
+        # 将图像分成四个区域：顶部(0-25%)、上中部(25-50%)、下中部(50-75%)、底部(75-100%)
+        top_end = int(height * 0.25)          # 顶部区域结束点
+        upper_mid_end = int(height * 0.5)     # 上中部结束点
+        lower_mid_end = int(height * 0.75)    # 下中部结束点
+        
+        # 大幅提高上中部权重，适度提高顶部权重，降低下部权重
+        weight_matrix[:top_end, :] *= 1.5              # 顶部权重提高到1.5
+        weight_matrix[top_end:upper_mid_end, :] *= 2.0 # 上中部权重提高到2.0（最高优先级）
+        weight_matrix[upper_mid_end:lower_mid_end, :] *= 0.5 # 下中部降低到0.5
+        weight_matrix[lower_mid_end:, :] *= 0.2        # 底部权重最低0.2
+        
+        return weight_matrix
+
+    def analyze_hsv_sample(self, hsv_region):
+        """分析HSV区域样本，自动优化HSV阈值"""
+        if hsv_region is not None and hsv_region.size > 0:
+            # 仅保留有限数量的样本，先进先出
+            self.hsv_range_samples.append(hsv_region)
+            if len(self.hsv_range_samples) > self.max_samples:
+                self.hsv_range_samples.pop(0)
+            
+            # 计算所有样本的统计数据
+            if len(self.hsv_range_samples) > 5:  # 至少需要5个样本才开始分析
+                all_samples = np.vstack(self.hsv_range_samples)
+                
+                # 计算H、S、V通道的均值和标准差
+                h_mean = np.mean(all_samples[:, 0])
+                h_std = np.std(all_samples[:, 0])
+                s_mean = np.mean(all_samples[:, 1])
+                s_std = np.std(all_samples[:, 1])
+                v_mean = np.mean(all_samples[:, 2])
+                v_std = np.std(all_samples[:, 2])
+                
+                # 使用2个标准差覆盖约95%的样本
+                h_min = max(0, h_mean - 2 * h_std)
+                h_max = min(179, h_mean + 2 * h_std)
+                s_min = max(0, s_mean - 2 * s_std)
+                s_max = min(255, s_mean + 2 * s_std)
+                v_min = max(0, v_mean - 2 * v_std)
+                v_max = min(255, v_mean + 2 * v_std)
+                
+                # 返回优化的HSV范围
+                return (
+                    np.array([int(h_min), int(s_min), int(v_min)]),
+                    np.array([int(h_max), int(s_max), int(v_max)])
+                )
+        return None, None
+
+    def is_valid_green_target(self, contour, hsv, original_frame):
+        """增强的目标有效性验证"""
+        # 基础几何特征检查
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        
+        # 1. 计算圆形度 (4π*面积/周长²)，完美圆形为1
+        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+        
+        # 2. 拟合椭圆并检查长宽比
+        if len(contour) >= 5:  # 至少需要5个点才能拟合椭圆
+            ellipse = cv2.fitEllipse(contour)
+            (_, _), (width, height), _ = ellipse
+            aspect_ratio = min(width, height) / max(width, height) if max(width, height) > 0 else 0
+        else:
+            aspect_ratio = 1.0  # 点太少，假设是圆形
+        
+        # 3. 获取轮廓的边界框
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # 检查位置 - 更倾向于上半部分的目标
+        img_height = original_frame.shape[0]
+        position_score = 1.0
+        if y < img_height * 0.5:  # 在上半部分
+            position_score = 2.0   # 位置评分加倍
+        
+        # 4. 在原始帧中提取ROI
+        roi = original_frame[y:y+h, x:x+w]
+        
+        # 5. 分析ROI的亮度特征
+        if roi.size > 0:  # 确保ROI不为空
+            # 转为灰度
+            if len(roi.shape) == 3:
+                roi_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+            else:
+                roi_gray = roi
+                
+            # 计算亮度统计
+            mean_brightness = np.mean(roi_gray)
+            max_brightness = np.max(roi_gray)
+            brightness_std = np.std(roi_gray)
+            
+            # 6. 创建目标区域的HSV掩码
+            mask = np.zeros_like(original_frame[:,:,0])
+            cv2.drawContours(mask, [contour], 0, 255, -1)
+            
+            # 7. 获取掩码内的HSV值
+            hsv_masked = cv2.bitwise_and(hsv, hsv, mask=mask)
+            non_zero = hsv_masked[mask > 0]
+            
+            if non_zero.size > 0:
+                # 保存有效的HSV样本用于自适应
+                self.analyze_hsv_sample(non_zero)
+                
+                # 计算色相的集中度
+                h_values = non_zero[:, 0]
+                h_std = np.std(h_values)
+                
+                # 亮度与饱和度比例
+                v_values = non_zero[:, 2]
+                s_values = non_zero[:, 1]
+                sv_ratio = np.mean(s_values) / np.mean(v_values) if np.mean(v_values) > 0 else 0
+                
+                # 亮度稳定性，真实LED灯更均匀
+                brightness_uniformity = 1 - (brightness_std / (mean_brightness + 1e-5))
+                
+                # 计算绿色指标 - 真实绿灯在HSV中H值应该在绿色范围(约45-75)
+                h_mean = np.mean(h_values)
+                green_score = 0
+                if 35 <= h_mean <= 85:
+                    # 45-65是最佳绿色范围
+                    if 45 <= h_mean <= 75:
+                        green_score = 1.0
+                    else:
+                        green_score = 0.7  # 35-45或75-85是次优绿色
+                
+                # 判断标准：真实的绿色LED灯通常具有以下特征
+                # 调整参数，特别关注形状和位置
+                is_valid = (
+                    circularity > 0.6 and              # 形状更接近圆形 (提高阈值)
+                    aspect_ratio > 0.7 and             # 不要太扁
+                    mean_brightness > 100 and          # 足够亮
+                    brightness_std < 50 and            # 亮度分布相对均匀(放宽限制)
+                    h_std < 20 and                     # 色相一致(放宽限制)
+                    sv_ratio > 0.4 and sv_ratio < 2.5 and  # 饱和度与亮度的比例适中(放宽限制)
+                    green_score > 0.5                  # 必须在绿色范围内
+                )
+                
+                # 计算综合得分 - 用于后续权重计算
+                score = (
+                    circularity * 2.0 +                    # 圆形度很重要
+                    aspect_ratio * 1.0 +                   # 长宽比次要
+                    brightness_uniformity * 1.5 +          # 亮度均匀性
+                    (1.0 - min(h_std / 30.0, 1.0)) * 1.0 + # 色相一致性
+                    green_score * 2.5 +                    # 绿色评分很重要
+                    position_score * 2.0                   # 位置评分最重要
+                )
+                
+                return is_valid, {
+                    'circularity': circularity,
+                    'aspect_ratio': aspect_ratio,
+                    'mean_brightness': mean_brightness,
+                    'brightness_std': brightness_std,
+                    'h_std': h_std,
+                    'h_mean': h_mean,
+                    'sv_ratio': sv_ratio,
+                    'position_score': position_score,
+                    'green_score': green_score,
+                    'combined_score': score
+                }
+        
+        return False, {}
+
+    def detect_green_light_and_offset(self, frame, lower_hsv, upper_hsv):
+        """
+        检测图像中的绿光并计算偏差值，使用多种滤波方法提高稳定性
+        """
+        # 转换到HSV空间
+        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+        
+        # 自适应HSV阈值
+        adaptive_lower, adaptive_upper = self.analyze_hsv_sample(None)
+        if adaptive_lower is not None and len(self.hsv_range_samples) > 20:
+            # 只有在收集了足够的样本后才使用自适应阈值
+            # 在用户提供的阈值和自适应阈值之间取平衡
+            lower_hsv = np.clip((lower_hsv * 0.7 + adaptive_lower * 0.3), 0, 255).astype(np.uint8)
+            upper_hsv = np.clip((upper_hsv * 0.7 + adaptive_upper * 0.3), 0, 255).astype(np.uint8)
+        
+        # 使用更小的核进行高斯模糊以减少噪点但保留细节
+        hsv = cv2.GaussianBlur(hsv, (5, 5), 0)
+        
+        # 创建掩膜
+        mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+        
+        # 保存原始掩码用于调试
+        self.debug_mask = mask.copy()
+        
+        # 调整形态学操作的核大小 - 使用更大的核移除噪点
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        
+        # 强化形态学操作，先开运算去噪点，后闭运算补充主体
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+        
+        # 再次进行开运算，移除小的孤立区域
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+        
+        # 查找轮廓
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 面积阈值 - 调整为与实际绿光大小相符
+        MIN_AREA = 70    # 增加最小面积阈值，过滤小噪点
+        MAX_AREA = 12000 # 适当减小最大面积阈值
+        
+        valid_contours = []
+        
+        # 创建或更新权重矩阵
+        if self.weight_matrix is None or self.weight_matrix.shape[:2] != frame.shape[:2]:
+            self.weight_matrix = self.create_weight_matrix(frame)
+        
+        # 对于调试，创建结果图像
+        debug_img = frame.copy()
+        
+        # 收集所有有效的轮廓
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if MIN_AREA <= area <= MAX_AREA:
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    # 应用增强的目标验证
+                    is_valid, metrics = self.is_valid_green_target(contour, hsv, frame)
+                    
+                    # 在调试图像上绘制所有检测到的轮廓
+                    cv2.drawContours(debug_img, [contour], -1, (0, 0, 255), 1)
+                    
+                    if is_valid:
+                        # 应用权重矩阵 - 基于位置
+                        position_weight = self.weight_matrix[cy, cx]
+                        
+                        # 计算位置连续性分数 - 如果与上一个有效位置接近，得分更高
+                        continuity_score = 1.0
+                        if self.last_valid_position is not None:
+                            last_x, last_y = self.last_valid_position
+                            dist = np.sqrt((cx - last_x) ** 2 + (cy - last_y) ** 2)
+                            max_dist = frame.shape[0] * 0.3  # 最大距离设为图像高度的30%
+                            if dist < max_dist:
+                                continuity_score = 1.0 + (1.0 - dist / max_dist)  # 1.0~2.0之间
+                        
+                        # 计算最终权重 - 综合考虑面积、位置权重、目标评分和位置连续性
+                        combined_score = metrics.get('combined_score', 1.0)
+                        final_weight = area * position_weight * combined_score * continuity_score
+                        
+                        # 在调试图像上标记有效目标
+                        cv2.drawContours(debug_img, [contour], -1, (0, 255, 0), 2)
+                        cv2.circle(debug_img, (cx, cy), 5, (255, 0, 0), -1)
+                        
+                        valid_contours.append({
+                            'contour': contour,
+                            'area': area,
+                            'center': (cx, cy),
+                            'weight': final_weight,
+                            'metrics': metrics
+                        })
+        
+        self.debug_result = debug_img
+        
+        if valid_contours:
+            # 选择权重最大的轮廓
+            best_contour = max(valid_contours, key=lambda x: x['weight'])
+            
+            max_contour = best_contour['contour']
+            area = best_contour['area']
+            cx, cy = best_contour['center']
+            
+            # 更新最后有效位置
+            self.last_valid_position = (cx, cy)
+            
+            # 额外检查：在高亮度环境下，增加严格度
+            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            avg_brightness = np.mean(gray)
+            
+            # 如果整体亮度高，应用更严格的验证
+            if avg_brightness > 180:  # 提高亮度阈值
+                metrics = best_contour['metrics']
+                
+                # 在高亮度环境下额外检查
+                if metrics.get('brightness_std', 100) > 60 or metrics.get('green_score', 0) < 0.6:
+                    # 高亮度环境下不满足条件，放弃此次检测
+                    self.lost_count += 1
+                    if self.lost_count < self.MAX_LOST_FRAMES:
+                        predicted_offset = self.kalman_filter.update(None)
+                        if predicted_offset is None:
+                            return True, self.last_valid_offset, None
+                        return True, int(predicted_offset), None
+                    return True, self.last_valid_offset, None
+            
+            x, y, w, h = cv2.boundingRect(max_contour)
+            
+            frame_center_x = frame.shape[1] // 2
+            horizontal_offset = cx - frame_center_x
+            
+            # 添加到最近检测历史
+            self.recent_detections.append((cx, cy, area))
+            
+            # 使用卡尔曼滤波
+            filtered_offset = self.kalman_filter.update(horizontal_offset)
+            
+            # 添加到历史记录
+            self.offset_history.append(filtered_offset)
+            
+            # 使用中值滤波代替平均值，减少异常值影响
+            smoothed_offset = int(np.median(self.offset_history))
+            
+            self.last_valid_offset = smoothed_offset
+            self.lost_count = 0
+            
+            contour_info = {
+                'contour': max_contour,
+                'bbox': (x, y, w, h),
+                'center': (int(cx), int(cy)),
+                'area': area,
+                'raw_offset': horizontal_offset,
+                'filtered_offset': filtered_offset,
+                'smoothed_offset': smoothed_offset,
+                'metrics': best_contour['metrics']
+            }
+            
+            return True, smoothed_offset, contour_info
+
+        # 目标丢失处理
+        self.lost_count += 1
+        if self.lost_count < self.MAX_LOST_FRAMES:
+            # 使用卡尔曼滤波预测值
+            predicted_offset = self.kalman_filter.update(None)
+            # 返回检测结果和偏移
+            if predicted_offset is None:
+                return True, self.last_valid_offset, None  # 当predicted_offset为None时返回最后一次有效的偏差值
+            return True, int(predicted_offset), None
+        
+        # 超过MAX_LOST_FRAMES，仍然返回最后一次有效的偏移值
+        return True, self.last_valid_offset, None
+
+# 创建检测器实例
+detector = GreenLightDetector()
+
+# 修改原来的函数为包装函数
+def detect_green_light_and_offset(frame, lower_hsv, upper_hsv):
+    return detector.detect_green_light_and_offset(frame, lower_hsv, upper_hsv)
+
+def create_trackbars():
+    """
+    创建滑动条，用于调节 HSV 阈值
+    """
+    cv2.namedWindow('HSV Trackbars')
+    # 调整默认值以更好地检测绿光 - 更精确的绿色范围
+    cv2.createTrackbar('H min', 'HSV Trackbars', 45, 179, lambda x: None)
+    cv2.createTrackbar('H max', 'HSV Trackbars', 75, 179, lambda x: None)
+    cv2.createTrackbar('S min', 'HSV Trackbars', 70, 255, lambda x: None)
+    cv2.createTrackbar('S max', 'HSV Trackbars', 255, 255, lambda x: None)
+    cv2.createTrackbar('V min', 'HSV Trackbars', 100, 255, lambda x: None)
+    cv2.createTrackbar('V max', 'HSV Trackbars', 255, 255, lambda x: None)
+
+def get_trackbar_values():
+    """
+    获取滑动条的 HSV 阈值
+    :return: lower_hsv, upper_hsv
+    """
+    h_min = cv2.getTrackbarPos('H min', 'HSV Trackbars')
+    h_max = cv2.getTrackbarPos('H max', 'HSV Trackbars')
+    s_min = cv2.getTrackbarPos('S min', 'HSV Trackbars')
+    s_max = cv2.getTrackbarPos('S max', 'HSV Trackbars')
+    v_min = cv2.getTrackbarPos('V min', 'HSV Trackbars')
+    v_max = cv2.getTrackbarPos('V max', 'HSV Trackbars')
+    
+    lower_hsv = np.array([h_min, s_min, v_min])
+    upper_hsv = np.array([h_max, s_max, v_max])
+    
+    return lower_hsv, upper_hsv
+
+def get_debug_images():
+    """
+    获取调试图像
+    :return: mask图像, 结果图像
+    """
+    return detector.debug_mask, detector.debug_result
