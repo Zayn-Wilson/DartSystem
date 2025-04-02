@@ -13,7 +13,7 @@ from serial_communication import SerialCommunication
 # from screen_recorder import start_screen_recording, stop_screen_recording
 from system_recorder import start_system_recording as start_screen_recording
 from system_recorder import stop_system_recording as stop_screen_recording
-
+#改动
 # 根据系统选择正确的库路径
 
 if sys.platform.startswith("win"):
