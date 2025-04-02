@@ -167,8 +167,8 @@ class MainWindow(QMainWindow):
     def setup_serial(self):
         # 初始化串口通信
         try:
-            self.serial_comm = SerialCommunication(port='/dev/my_stm32', baudrate=115200)
-            #self.serial_comm = SerialCommunication(port='/dev/ttyACM0', baudrate=115200)
+            #self.serial_comm = SerialCommunication(port='/dev/my_stm32', baudrate=115200)
+            self.serial_comm = SerialCommunication(port='/dev/ttyACM0', baudrate=115200)
             print("串口初始化成功")
             # 添加状态帧计数器
             self.status_frame_counter = 0
@@ -209,30 +209,38 @@ class MainWindow(QMainWindow):
         cv2.putText(result, f"FPS: {fps:.1f}", (10, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        # 根据检测结果发送数据
+        # 计算偏移值（整数）
+        offset_int = int(horizontal_offset) if green_detected and contour_info else int(detector.last_valid_offset)
+        
+        # 显示偏移值（在UI上）
+        cv2.putText(result, f"Offset: {'+' if offset_int > 0 else ''}{offset_int:d}", (10, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+        # 如果检测到目标，显示面积（在UI上）
+        if green_detected and contour_info:
+            area = contour_info['area']
+            cv2.putText(result, f"Area: {area:.0f}", (10, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+        # 恢复串口通信功能
         if self.serial_comm is not None:
             try:
-                # 每隔10帧发送一次状态帧
-                if self.status_frame_counter % 10 == 0:
-                    # 发送状态帧，参数为是否检测到目标
-                    self.serial_comm.send_status_frame(green_detected)
-                    status_text = "检测到目标" if green_detected else "未检测到目标"
-                    print(f"发送状态帧：A5 01 {0x01 if green_detected else 0x00:02X} ({status_text})")
-                    # 在图像上显示状态帧信息
-                    cv2.putText(result, f"Status Frame: {status_text}", (10, 150),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                # 将布尔值明确转换为整数
+                # 只有当检测到绿灯时，status_int和green_status_int才为1
+                status_int = 1 if green_detected and contour_info else 0
+                green_status_int = 1 if green_detected and contour_info else 0
                 
-                # 每帧都发送偏差值帧
-                if green_detected and contour_info:
-                    print(f"检测到绿光！偏差值: {horizontal_offset:d}")
-                    # 发送偏差值帧
-                    self.serial_comm.send_offset_frame(horizontal_offset)
-                    print(f"发送偏差值帧：A5 02 {(horizontal_offset >> 8) & 0xFF:02X} {horizontal_offset & 0xFF:02X}")
-                else:
-                    print("未检测到绿光")
-                    # 未检测到时发送最后一次有效的偏差值
-                    self.serial_comm.send_offset_frame(detector.last_valid_offset)
-                    print(f"发送偏差值帧：A5 02 {(detector.last_valid_offset >> 8) & 0xFF:02X} {detector.last_valid_offset & 0xFF:02X}")
+                # 发送合并帧
+                self.serial_comm.send_combined_frame(status_int, green_status_int, offset_int)
+                
+                # 显示发送信息（仅在控制台）
+                status_text = "检测到目标" if status_int == 1 else "未检测到目标"
+                green_status_text = "检测到绿灯" if green_status_int == 1 else "未检测到绿灯"
+                
+                print(f"发送合并帧：A5 {status_int:02X} {green_status_int:02X} {(offset_int >> 8) & 0xFF:02X} {offset_int & 0xFF:02X}")
+                print(f"  - 状态: {status_text}")
+                print(f"  - 绿灯: {green_status_text}")
+                print(f"  - 偏移值: {offset_int:d}")
                 
                 self.status_frame_counter += 1
                 
