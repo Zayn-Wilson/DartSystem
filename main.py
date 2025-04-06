@@ -167,8 +167,8 @@ class MainWindow(QMainWindow):
     def setup_serial(self):
         # 初始化串口通信
         try:
-            #self.serial_comm = SerialCommunication(port='/dev/my_stm32', baudrate=115200)
-            self.serial_comm = SerialCommunication(port='/dev/ttyACM0', baudrate=115200)
+            self.serial_comm = SerialCommunication(port='/dev/my_stm32', baudrate=115200)
+            #self.serial_comm = SerialCommunication(port='/dev/ttyACM0', baudrate=115200)
             print("串口初始化成功")
             # 添加状态帧计数器
             self.status_frame_counter = 0
@@ -205,21 +205,32 @@ class MainWindow(QMainWindow):
         center_x = w // 2
         center_y = h // 2
         
+        # 设置文字显示的基础位置和间距
+        text_start_x = 10
+        text_start_y = 30  # 起始位置调高
+        line_spacing = 40  # 增加行间距
+        
         # 显示帧率
-        cv2.putText(result, f"FPS: {fps:.1f}", (10, 70),
+        fps_y = text_start_y
+        cv2.putText(result, f"FPS: {fps:.1f}", 
+                    (text_start_x, fps_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         # 计算偏移值（整数）
         offset_int = int(horizontal_offset) if green_detected and contour_info else int(detector.last_valid_offset)
         
-        # 显示偏移值（在UI上）
-        cv2.putText(result, f"Offset: {'+' if offset_int > 0 else ''}{offset_int:d}", (10, 110),
+        # 显示偏移值
+        offset_y = fps_y + line_spacing
+        cv2.putText(result, f"Offset: {'+' if offset_int > 0 else ''}{offset_int:d}", 
+                    (text_start_x, offset_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        # 如果检测到目标，显示面积（在UI上）
+        # 如果检测到目标，显示面积
         if green_detected and contour_info:
             area = contour_info['area']
-            cv2.putText(result, f"Area: {area:.0f}", (10, 150),
+            area_y = offset_y + line_spacing
+            cv2.putText(result, f"Area: {area:.0f}", 
+                        (text_start_x, area_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         # 恢复串口通信功能
@@ -264,24 +275,9 @@ class MainWindow(QMainWindow):
             target_center = contour_info['center']
             cv2.circle(result, target_center, 3, (0, 0, 255), -1)
             
-            # 显示检测框的数据
-            info_y = 110  # 起始y坐标
-            cv2.putText(result, f"Area: {contour_info['area']:.0f}", (10, info_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(result, f"Size: {w}x{h}", (10, info_y + 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(result, f"Center: ({target_center[0]}, {target_center[1]})", (10, info_y + 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
             # 绘制从中心到目标的连线
             center = (center_x, center_y)
-            target_center = contour_info['center']
             cv2.line(result, center, target_center, (0, 255, 255), 2)
-            
-            # 显示偏差值，添加正负号
-            offset_text = f"Offset: {'+' if horizontal_offset > 0 else ''}{horizontal_offset:d}"
-            cv2.putText(result, offset_text, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         # 显示图像
         h, w, ch = result.shape
