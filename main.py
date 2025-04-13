@@ -13,6 +13,7 @@ from serial_communication import SerialCommunication
 # from screen_recorder import start_screen_recording, stop_screen_recording
 from system_recorder import start_system_recording as start_screen_recording
 from system_recorder import stop_system_recording as stop_screen_recording
+from serial_receiver import SerialReceiver  # 导入SerialReceiver类
 #改动
 # 根据系统选择正确的库路径
 
@@ -60,14 +61,28 @@ class MainWindow(QMainWindow):
         self.prev_frame_time = 0
         self.curr_frame_time = 0
         
+        # 初始化串口数据相关变量
+        self.received_yaw = 0
+        self.received_preload = 0
+        self.last_serial_update_time = 0  # 确保变量被正确初始化
+        self.serial_debug_counter = 0  # 用于追踪串口读取次数
+        
         self.initUI()
         self.setup_camera()
         self.setup_serial()
+        self.setup_serial_receiver()  # 设置串口接收
         
         # 创建定时器更新图像
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)  # 30ms 刷新一次
+        
+        # 创建定时器读取串口数据 - 使用更快的更新频率
+        self.serial_timer = QTimer()
+        self.serial_timer.timeout.connect(self.read_serial_data)
+        self.serial_timer.start(10)  # 10ms 读取一次串口数据
+        
+        print("定时器已启动: 图像刷新-30ms, 串口读取-10ms")
         
         # 创建 HSV 阈值调节滑动条
         create_trackbars()
@@ -167,14 +182,142 @@ class MainWindow(QMainWindow):
     def setup_serial(self):
         # 初始化串口通信
         try:
+            # 尝试连接电控的串口
             self.serial_comm = SerialCommunication(port='/dev/my_stm32', baudrate=115200)
-            #self.serial_comm = SerialCommunication(port='/dev/ttyACM0', baudrate=115200)
-            print("串口初始化成功")
+            # 如果连接失败，可以尝试其他常用端口
+            print("串口初始化成功，使用端口：/dev/my_stm32")
+            
             # 添加状态帧计数器
             self.status_frame_counter = 0
+            
+            # 检查串口是否已打开
+            if not self.serial_comm.serial.is_open:
+                self.serial_comm.serial.open()
+                print("重新打开串口")
+            
+            # 清空缓冲区，确保获取最新数据
+            self.serial_comm.serial.reset_input_buffer()
+            self.serial_comm.serial.reset_output_buffer()
+            
+            # 注释掉接收数据的尝试
+            # self.serial_comm.check_for_data()
+            
         except Exception as e:
             print(f"串口初始化失败: {str(e)}")
-            self.serial_comm = None
+            
+            # 尝试备用端口
+            try:
+                self.serial_comm = SerialCommunication(port='/dev/ttyACM0', baudrate=115200)
+                print("使用备用串口初始化成功，使用端口：/dev/ttyACM0")
+            except Exception as e2:
+                print(f"备用串口初始化也失败: {str(e2)}")
+                self.serial_comm = None
+
+    def setup_serial_receiver(self):
+        """设置串口接收器"""
+        try:
+            # 使用ttyACM1端口，与serial_receiver.py默认值一致
+            self.serial_receiver = SerialReceiver(port='/dev/ttyACM1', baudrate=115200)
+            print("串口接收器初始化成功，使用端口：/dev/ttyACM1")
+            
+            # 简单测试是否能正常收到数据
+            for _ in range(3):
+                test_data = self.serial_receiver.read_frame()
+                if test_data is not None:
+                    print(f"测试数据读取成功: yaw={test_data['yaw']}, preload={test_data['preload']}")
+                    # 立即更新显示数据
+                    self.received_yaw = test_data['yaw']
+                    self.received_preload = test_data['preload']
+                    self.last_serial_update_time = time.time()
+                    break
+                time.sleep(0.1)
+            
+        except Exception as e:
+            print(f"串口接收器初始化失败: {str(e)}")
+            # 尝试备用端口 - 符号链接
+            try:
+                self.serial_receiver = SerialReceiver(port='/dev/my_stm32', baudrate=115200)
+                print("串口接收器初始化成功，使用备用端口：/dev/my_stm32")
+            except Exception as e2:
+                print(f"备用串口接收器初始化也失败: {str(e2)}")
+                self.serial_receiver = None
+
+    def read_serial_data(self):
+        """读取串口数据"""
+        self.serial_debug_counter += 1
+        # 大幅降低定时器触发次数的打印频率
+        # if self.serial_debug_counter % 500 == 0: 
+        #     print(f"串口读取定时器触发次数: {self.serial_debug_counter}")
+
+        if self.serial_receiver is not None:
+            try:
+                if not self.serial_receiver.serial.is_open:
+                    # 保留串口重连逻辑和打印
+                    print("接收串口已关闭，尝试重新打开...")
+                    try:
+                        self.serial_receiver.serial.open()
+                        print("接收串口重新打开成功。")
+                    except Exception as open_err:
+                        print(f"重新打开接收串口失败: {open_err}")
+                        return 
+
+                # # 暂时移除缓冲区检查和重置的打印
+                # if self.serial_debug_counter % 50 == 1: 
+                #      try:
+                #          bytes_in_waiting = self.serial_receiver.serial.in_waiting
+                #          print(f"[调试] 输入缓冲区字节数: {bytes_in_waiting}")
+                #      except Exception as e:
+                #          print(f"[调试] 无法检查缓冲区: {e}")
+                # if self.serial_debug_counter % 50 == 0:
+                #     # print("[调试] 尝试重置输入缓冲区...")
+                #     self.serial_receiver.serial.reset_input_buffer()
+                #     # print("[调试] 输入缓冲区已重置。")
+
+                data = self.serial_receiver.read_frame()
+
+                # 降低 read_frame 返回值的打印频率
+                if self.serial_debug_counter % 50 == 0: # 每 50 次打印一次 (约 0.5s)
+                    print(f"[调试] read_frame 返回: {data}")
+
+                if data is not None:
+                    self.last_serial_update_time = time.time()
+
+                    if self.received_yaw != data['yaw'] or self.received_preload != data['preload']:
+                        # 保留数据更新的打印，因为这比较关键
+                        print(f"数据更新: yaw: {self.received_yaw} -> {data['yaw']}, preload: {self.received_preload} -> {data['preload']}")
+                        self.received_yaw = data['yaw']
+                        self.received_preload = data['preload']
+                    
+                    # 降低当前值的打印频率
+                    # if self.serial_debug_counter % 100 == 0: # 每 100 次打印一次 (约 1s)
+                    #     print(f"当前串口数据: yaw={self.received_yaw}, preload={self.received_preload}")
+
+            except Exception as e:
+                # 保留错误处理和重连逻辑及打印
+                print(f"读取串口数据错误: {str(e)}")
+                print("尝试重新初始化串口接收器...")
+                try:
+                    # ... (重连逻辑保持不变) ...
+                    if self.serial_receiver:
+                        self.serial_receiver.close()
+                    time.sleep(0.5)
+                    primary_port = '/dev/ttyACM1'
+                    backup_port = '/dev/my_stm32'
+                    try:
+                        self.serial_receiver = SerialReceiver(port=primary_port, baudrate=115200)
+                        print(f"串口接收器在 {primary_port} 重新初始化成功")
+                    except Exception:
+                         print(f"主端口 {primary_port} 失败, 尝试备用端口 {backup_port}...")
+                         try:
+                             self.serial_receiver = SerialReceiver(port=backup_port, baudrate=115200)
+                             print(f"串口接收器在 {backup_port} 重新初始化成功")
+                         except Exception as reinit_err_backup:
+                              print(f"备用串口接收器初始化也失败: {str(reinit_err_backup)}")
+                              self.serial_receiver = None 
+
+                except Exception as reinit_err:
+                    print(f"串口接收器重新初始化过程中出错: {str(reinit_err)}")
+                    self.serial_receiver = None 
 
     def update_frame(self):
         # 计算帧率
@@ -232,7 +375,24 @@ class MainWindow(QMainWindow):
             cv2.putText(result, f"Area: {area:.0f}", 
                         (text_start_x, area_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
+        
+        # 显示接收到的串口数据
+        serial_data_y = (area_y if green_detected and contour_info else offset_y) + line_spacing
+        
+        # 计算自上次接收数据以来的时间
+        time_since_update = time.time() - self.last_serial_update_time
+        
+        # 如果在最近2秒内有更新，则用绿色显示；否则用红色显示
+        serial_color = (0, 255, 0) if time_since_update < 2.0 else (0, 0, 255)
+        
+        cv2.putText(result, f"Received Yaw: {int(self.received_yaw)}", 
+                    (text_start_x, serial_data_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, serial_color, 2)
+                    
+        cv2.putText(result, f"Received Preload: {int(self.received_preload)}", 
+                    (text_start_x, serial_data_y + line_spacing),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, serial_color, 2)
+            
         # 恢复串口通信功能
         if self.serial_comm is not None:
             try:
@@ -297,14 +457,35 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭事件"""
+        print("正在关闭应用...")
+        
+        # 停止定时器
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+        if hasattr(self, 'serial_timer'):
+            self.serial_timer.stop()
+        
+        # 关闭相机
         if self.camera is not None:
+            print("关闭相机...")
             self.camera.MV_CC_StopGrabbing()
             self.camera.MV_CC_CloseDevice()
             self.camera.MV_CC_DestroyHandle()
+        
         # 停止屏幕录制
+        print("停止屏幕录制...")
         stop_screen_recording()
+        
+        # 关闭串口
         if self.serial_comm is not None:
+            print("关闭发送串口...")
             self.serial_comm.close()
+        
+        if hasattr(self, 'serial_receiver') and self.serial_receiver is not None:
+            print("关闭接收串口...")
+            self.serial_receiver.close()
+        
+        print("应用已关闭")
         event.accept()
 
     def initUI(self):
@@ -330,7 +511,7 @@ class MainWindow(QMainWindow):
         self.mask_label = QLabel()
         self.mask_label.setMinimumSize(640, 480)
         right_layout.addWidget(self.mask_label)
-
+        
         # 将左右布局添加到主布局
         layout.addLayout(left_layout)
         layout.addLayout(right_layout)
