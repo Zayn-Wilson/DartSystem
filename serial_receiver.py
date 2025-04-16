@@ -16,6 +16,9 @@ class SerialReceiver(QThread):
         self.last_preload = 0
         self.serial = None
         self.running = True
+        self.FRAME_HEADER = 0x05  # 帧头
+        self.FRAME_TAIL = 0xA0    # 帧尾
+        self.FRAME_LENGTH = 6     # 新的帧长度：帧头(1) + yaw(2) + preload(2) + 帧尾(1)
         self.connect_serial()
 
     def connect_serial(self):
@@ -36,16 +39,24 @@ class SerialReceiver(QThread):
                     if self.serial.in_waiting > 0:
                         new_data = self.serial.read(self.serial.in_waiting)
                         self.buffer.extend(new_data)
-                        print(f"[接收到原始字节流] {new_data.hex()}")  # 打印接收到的原始字节流
+                        print(f"[接收到原始字节流] {new_data.hex()}")
 
-                    if len(self.buffer) >= 5:
+                    if len(self.buffer) >= self.FRAME_LENGTH:
                         try:
-                            start_index = self.buffer.index(0x05)
-                            if len(self.buffer) - start_index >= 5:
-                                frame = self.buffer[start_index:start_index + 5]
-                                self.buffer = self.buffer[start_index + 5:]
+                            start_index = self.buffer.index(self.FRAME_HEADER)
+                            if len(self.buffer) - start_index >= self.FRAME_LENGTH:
+                                frame = self.buffer[start_index:start_index + self.FRAME_LENGTH]
+                                
+                                # 检查帧尾
+                                if frame[-1] != self.FRAME_TAIL:
+                                    print(f"[警告] 帧尾校验失败: {frame[-1]:02X}")
+                                    self.buffer = self.buffer[start_index + 1:]
+                                    continue
+
+                                self.buffer = self.buffer[start_index + self.FRAME_LENGTH:]
                                 hex_data = ' '.join(f'{b:02X}' for b in frame)
                                 print(f"[找到完整帧] {hex_data}")
+                                
                                 yaw_bytes = frame[1:3]
                                 preload_bytes = frame[3:5]
 
@@ -53,13 +64,13 @@ class SerialReceiver(QThread):
                                 yaw = struct.unpack('<H', yaw_bytes)[0]
                                 preload = struct.unpack('<h', preload_bytes)[0]
 
-                                # 数据有效性检查：确保yaw和preload值在合理范围内
+                                # 数据有效性检查
                                 if yaw < 0 or yaw > 65535:
                                     print(f"[警告] 无效的yaw值: {yaw}")
-                                    continue  # 跳过无效的数据
+                                    continue
                                 if preload < -32768 or preload > 32767:
                                     print(f"[警告] 无效的preload值: {preload}")
-                                    continue  # 跳过无效的数据
+                                    continue
 
                                 print(f"[解析后] yaw: {yaw}, preload: {preload}")
                                 self.last_yaw = yaw
@@ -67,21 +78,21 @@ class SerialReceiver(QThread):
                                 self.data_received.emit(float(yaw), float(preload))
                                 return {'yaw': yaw, 'preload': preload}
                             else:
-                                time.sleep(0.01)  # 数据不足，继续等待
+                                time.sleep(0.01)
                                 continue
                         except ValueError:
                             print(f"[警告] 未找到帧头，移除第一个字节: {self.buffer.hex()}")
-                            self.buffer.pop(0)  # 移除错误字节继续尝试
+                            self.buffer.pop(0)
                             continue
                     else:
-                        time.sleep(0.01)  # 数据不足，继续等待
+                        time.sleep(0.01)
                         continue
             except serial.SerialException as e:
                 print(f"读取串口数据出错: {e}")
                 self.connect_serial()
             except struct.error as e:
                 print(f"解析结构体出错: {e}, 缓冲区: {self.buffer.hex()}")
-                self.buffer.clear()  # 清空缓冲区
+                self.buffer.clear()
         else:
             self.connect_serial()
 
