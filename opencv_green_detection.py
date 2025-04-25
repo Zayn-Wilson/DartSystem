@@ -2,6 +2,14 @@ import cv2
 import numpy as np
 from collections import deque
 
+# 全局变量声明
+GUI_AVAILABLE = False  # 默认为False，将在create_trackbars中尝试创建窗口时更新
+DEFAULT_HSV_VALUES = {
+    'H min': 30, 'H max': 90, 
+    'S min': 30, 'S max': 255, 
+    'V min': 120, 'V max': 255
+}
+
 class KalmanFilter1D:
     def __init__(self):
         self.kalman = cv2.KalmanFilter(2, 1)
@@ -485,27 +493,53 @@ def detect_green_light_and_offset(frame, lower_hsv, upper_hsv):
 def create_trackbars():
     """
     创建滑动条，用于调节 HSV 阈值
+    如果无法创建窗口，将使用默认值
     """
-    cv2.namedWindow('HSV Trackbars')
-    # 根据图像中的绿光特征调整HSV范围 - 更宽松的范围
-    cv2.createTrackbar('H min', 'HSV Trackbars', 30, 179, lambda x: None)  # 进一步降低H下限
-    cv2.createTrackbar('H max', 'HSV Trackbars', 90, 179, lambda x: None)  # 进一步提高H上限
-    cv2.createTrackbar('S min', 'HSV Trackbars', 30, 255, lambda x: None)  # 进一步降低S下限
-    cv2.createTrackbar('S max', 'HSV Trackbars', 255, 255, lambda x: None)
-    cv2.createTrackbar('V min', 'HSV Trackbars', 120, 255, lambda x: None)  # 调整V下限
-    cv2.createTrackbar('V max', 'HSV Trackbars', 255, 255, lambda x: None)
+    global GUI_AVAILABLE
+    try:
+        cv2.namedWindow('HSV Trackbars')
+        # 根据图像中的绿光特征调整HSV范围 - 更宽松的范围
+        cv2.createTrackbar('H min', 'HSV Trackbars', 30, 179, lambda x: None)  # 进一步降低H下限
+        cv2.createTrackbar('H max', 'HSV Trackbars', 90, 179, lambda x: None)  # 进一步提高H上限
+        cv2.createTrackbar('S min', 'HSV Trackbars', 30, 255, lambda x: None)  # 进一步降低S下限
+        cv2.createTrackbar('S max', 'HSV Trackbars', 255, 255, lambda x: None)
+        cv2.createTrackbar('V min', 'HSV Trackbars', 120, 255, lambda x: None)  # 调整V下限
+        cv2.createTrackbar('V max', 'HSV Trackbars', 255, 255, lambda x: None)
+        GUI_AVAILABLE = True
+    except cv2.error:
+        print("[INFO] OpenCV GUI不可用，使用默认HSV值")
+        GUI_AVAILABLE = False
 
 def get_trackbar_values():
     """
     获取滑动条的 HSV 阈值
+    如果GUI不可用，则返回默认值
     :return: lower_hsv, upper_hsv
     """
-    h_min = cv2.getTrackbarPos('H min', 'HSV Trackbars')
-    h_max = cv2.getTrackbarPos('H max', 'HSV Trackbars')
-    s_min = cv2.getTrackbarPos('S min', 'HSV Trackbars')
-    s_max = cv2.getTrackbarPos('S max', 'HSV Trackbars')
-    v_min = cv2.getTrackbarPos('V min', 'HSV Trackbars')
-    v_max = cv2.getTrackbarPos('V max', 'HSV Trackbars')
+    if GUI_AVAILABLE:
+        try:
+            h_min = cv2.getTrackbarPos('H min', 'HSV Trackbars')
+            h_max = cv2.getTrackbarPos('H max', 'HSV Trackbars')
+            s_min = cv2.getTrackbarPos('S min', 'HSV Trackbars')
+            s_max = cv2.getTrackbarPos('S max', 'HSV Trackbars')
+            v_min = cv2.getTrackbarPos('V min', 'HSV Trackbars')
+            v_max = cv2.getTrackbarPos('V max', 'HSV Trackbars')
+        except cv2.error:
+            # 如果获取轨迹条失败，使用默认值
+            h_min = DEFAULT_HSV_VALUES['H min']
+            h_max = DEFAULT_HSV_VALUES['H max']
+            s_min = DEFAULT_HSV_VALUES['S min']
+            s_max = DEFAULT_HSV_VALUES['S max']
+            v_min = DEFAULT_HSV_VALUES['V min']
+            v_max = DEFAULT_HSV_VALUES['V max']
+    else:
+        # 使用默认值
+        h_min = DEFAULT_HSV_VALUES['H min']
+        h_max = DEFAULT_HSV_VALUES['H max']
+        s_min = DEFAULT_HSV_VALUES['S min']
+        s_max = DEFAULT_HSV_VALUES['S max']
+        v_min = DEFAULT_HSV_VALUES['V min']
+        v_max = DEFAULT_HSV_VALUES['V max']
     
     lower_hsv = np.array([h_min, s_min, v_min])
     upper_hsv = np.array([h_max, s_max, v_max])

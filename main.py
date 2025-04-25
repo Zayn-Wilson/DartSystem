@@ -180,24 +180,39 @@ def set_Value(cam, param_type="float_value", node_name="", node_value=0):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # 初始化串口数据相关变量
-        self.received_yaw = 0
-        self.received_preload = 0
-        self.last_serial_update_time = 0  # 用于跟踪最后一次数据更新时间
         
+        # 初始化变量
+        self.camera = None
+        self.camera_list = None
+        self.cam_handle = None
+        self.opencv_camera = None
+        self.is_running = True
+        self.device_manager = None
+        self.serial_comm = None  # 串口通信对象
+        self.prev_frame_time = 0
+        self.status_frame_counter = 0
+        self.received_angle = 0  # 从串口接收的角度值
+        self.received_count = 0  # 从串口接收的圈数值
+        self.last_serial_update_time = time.time()
+
+        # 初始化UI
         self.initUI()
-        self.setup_camera()
-        self.setup_serial()
-
-        # 创建定时器更新图像 (仅用于摄像头帧)
-        self.camera_timer = QTimer()
-        self.camera_timer.timeout.connect(self.update_camera_frame)
-        self.camera_timer.start(30)  # 30ms 刷新一次
-
-        print("定时器已启动: 图像刷新-30ms")
         
-        # 创建 HSV 阈值调节滑动条
-        create_trackbars()
+        # 设置摄像头
+        self.setup_camera()
+        
+        # 设置串口
+        self.setup_serial()
+        
+        # 创建帧率计算定时器
+        self.fps_timer = QTimer()
+        self.fps_timer.timeout.connect(self.update_camera_frame)
+        self.fps_timer.start(30)  # 30ms刷新一次，约为33帧每秒
+        
+        # 创建串口重新连接定时器
+        self.reconnect_timer = QTimer()
+        self.reconnect_timer.timeout.connect(self.refresh_connection)
+        self.reconnect_timer.start(5000)  # 每5秒尝试重新连接一次
 
     def setup_camera(self):
         """初始化相机"""
@@ -338,25 +353,25 @@ class MainWindow(QMainWindow):
             print("获取一帧图像失败: ret[0x%x]" % ret)
             return False, None
 
-    def update_serial_data_ui(self, yaw, preload):
+    def update_serial_data_ui(self, angle, count):
         """槽函数，用于更新 UI 上显示的串口数据"""
         # 保存旧值以便检查是否有变化
-        old_yaw = self.received_yaw
-        old_preload = self.received_preload
+        old_angle = self.received_angle
+        old_count = self.received_count
         
         # 更新值
-        self.received_yaw = yaw
-        self.received_preload = preload
+        self.received_angle = angle
+        self.received_count = count
         self.last_serial_update_time = time.time()
         
         # 检查是否有变化，如果有则打印更新信息并进行可视化反馈
         has_changes = False
-        if old_yaw != self.received_yaw:
-            print(f"Yaw数据更新: {old_yaw} -> {self.received_yaw}")
+        if old_angle != self.received_angle:
+            print(f"角度数据更新: {old_angle} -> {self.received_angle}")
             has_changes = True
             
-        if old_preload != self.received_preload:
-            print(f"Preload数据更新: {old_preload} -> {self.received_preload}")
+        if old_count != self.received_count:
+            print(f"圈数数据更新: {old_count} -> {self.received_count}")
             has_changes = True
             
         # 更新UI标签
@@ -377,8 +392,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(500, self.reset_label_style)
         
         # 更新标签文本
-        self.yaw_label.setText(f"Received Yaw: {int(self.received_yaw)}")
-        self.preload_label.setText(f"Received Preload: {int(self.received_preload)}")
+        self.yaw_label.setText(f"Received Angle: {int(self.received_angle)}")
+        self.preload_label.setText(f"Received Count: {int(self.received_count)}")
         
     def reset_label_style(self):
         """恢复标签的默认样式"""
@@ -457,13 +472,13 @@ class MainWindow(QMainWindow):
         else:
             serial_color = (0, 0, 255)  # 红色，表示数据已经过时
         
-        # 显示YAW数据，使用接收到的最新值
-        cv2.putText(result, f"Received Yaw: {int(self.received_yaw)}", 
+        # 显示角度数据，使用接收到的最新值
+        cv2.putText(result, f"Received Angle: {int(self.received_angle)}", 
                     (text_start_x, serial_data_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, serial_color, 2)
                     
-        # 显示PRELOAD数据，使用接收到的最新值
-        cv2.putText(result, f"Received Preload: {int(self.received_preload)}", 
+        # 显示圈数数据，使用接收到的最新值
+        cv2.putText(result, f"Received Count: {int(self.received_count)}", 
                     (text_start_x, serial_data_y + line_spacing),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, serial_color, 2)
                     
@@ -548,8 +563,8 @@ class MainWindow(QMainWindow):
         print("正在关闭应用...")
         
         # 停止定时器
-        if hasattr(self, 'camera_timer'):
-            self.camera_timer.stop()
+        if hasattr(self, 'fps_timer'):
+            self.fps_timer.stop()
         
         # 关闭相机
         if hasattr(self, 'camera') and self.camera is not None:
@@ -596,11 +611,11 @@ class MainWindow(QMainWindow):
         data_label_layout = QHBoxLayout()
         
         # 创建用于显示 yaw 和 preload 的标签，设置样式使其更明显
-        self.yaw_label = QLabel("Received Yaw: 0")
+        self.yaw_label = QLabel("Received Angle: 0")
         self.yaw_label.setStyleSheet("font-size: 16px; font-weight: bold; color: blue;")
         self.yaw_label.setMinimumWidth(200)
         
-        self.preload_label = QLabel("Received Preload: 0")
+        self.preload_label = QLabel("Received Count: 0")
         self.preload_label.setStyleSheet("font-size: 16px; font-weight: bold; color: green;")
         self.preload_label.setMinimumWidth(200)
         
@@ -627,9 +642,6 @@ class MainWindow(QMainWindow):
 
         main_widget.setLayout(layout)
 
-        # 初始化帧率计算变量
-        self.prev_frame_time = 0
-        
     def refresh_connection(self):
         """刷新串口连接"""
         if hasattr(self, 'serial_comm') and self.serial_comm is not None:
