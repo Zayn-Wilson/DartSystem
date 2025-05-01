@@ -10,12 +10,13 @@ from datetime import datetime
 class SystemRecorder:
     """系统录屏器，使用ffmpeg命令行工具进行屏幕录制"""
     
-    def __init__(self, output_folder=None, format="webm", capture_method="xcb"):
+    def __init__(self, output_folder=None, format="mkv", capture_method="xcb"):
         """初始化录屏器
         
         Args:
             output_folder: 视频保存的文件夹路径，默认为DartSystem/video
-            format: 视频格式，可选"mp4"、"avi"、"mkv"或"webm"
+            format: 视频格式，可选"mp4"、"avi"、"mkv"或"webm"，默认为 "mkv"
+            capture_method: 捕获方法，可选"x11"、"xcb"或"fb"
         """
         self.capture_method = capture_method.lower()  # 捕获方法
         # 设置输出文件夹
@@ -54,64 +55,111 @@ class SystemRecorder:
             # 生成输出文件名
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            # 根据选择的格式设置文件扩展名
+            # 根据选择的格式设置文件扩展名和编码器
             extension = self.format
-            if extension not in ["mp4", "avi", "mkv", "webm"]:
-                extension = "webm"  # 默认使用webm
-                
+            video_codec = "libvpx" # 默认为 webm (VP8/VP9)
+            ffmpeg_preset = None # 针对特定编码器的预设
+            
+            if extension == "mp4":
+                video_codec = "libx264"
+                ffmpeg_preset = "ultrafast" # 使用较快的预设以减少CPU负载
+                # 更全面的参数设置，确保断电时文件可恢复
+                movflags = [
+                    "-movflags", "+frag_keyframe+empty_moov+faststart+default_base_moof", 
+                    "-g", "30",  # 每30帧一个关键帧
+                    "-keyint_min", "15", # 最小关键帧间隔
+                    "-sc_threshold", "0", # 禁用场景变化检测
+                    "-strict", "experimental"
+                ]
+                print("选择 MP4 格式，使用 H.264 编码器 (libx264) 和优化的断电恢复参数")
+            elif extension == "mkv":
+                video_codec = "libx264"
+                ffmpeg_preset = "ultrafast"
+                # MKV格式参数，更容易从断电中恢复
+                movflags = [
+                    "-g", "30",  # 每30帧一个关键帧
+                    "-keyint_min", "15", # 最小关键帧间隔
+                    "-sc_threshold", "0", # 禁用场景变化检测
+                    "-cluster_time_limit", "1000", # 每秒创建新簇，便于恢复
+                    "-write_crc32", "1", # 添加CRC32校验，帮助检测损坏
+                    "-crf", "25" # 控制质量和大小
+                ]
+                print("选择 MKV 格式，使用 H.264 编码器 (libx264) 和断电恢复优化参数")
+            elif extension not in ["avi", "mkv", "webm", "mp4"]:
+                extension = "mkv" # 默认回退到 mkv，更容易恢复
+                # 使用相同的恢复参数
+                movflags = [
+                    "-g", "30",  # 每30帧一个关键帧
+                    "-keyint_min", "15", # 最小关键帧间隔
+                    "-sc_threshold", "0", # 禁用场景变化检测
+                    "-cluster_time_limit", "1000", # 每秒创建新簇，便于恢复
+                    "-write_crc32", "1", # 添加CRC32校验，帮助检测损坏
+                    "-crf", "25" # 控制质量和大小
+                ]
+                video_codec = "libx264"
+                ffmpeg_preset = "ultrafast"
+                print(f"不支持的格式 '{self.format}'，将使用默认的 mkv 格式。")
+            else:
+                movflags = []
+                print(f"选择 {extension} 格式，使用 VP8/VP9 编码器 (libvpx)")
+
             self.output_path = os.path.join(self.output_folder, f"screen_recording_{timestamp}.{extension}")
             print(f"屏幕录制将保存到: {self.output_path}")
             
-            # 根据捕获方法使用不同的命令
+            # 基础命令参数 (适用于 X11/XCB)
+            base_cmd_x11 = [
+                "ffmpeg",
+                "-f", "x11grab",
+                "-draw_mouse", "1",
+                "-s", self._get_screen_resolution(),
+                "-i", ":0.0+0,0",
+                "-r", "10",                # 帧率10fps
+                "-pix_fmt", "yuv420p",     # 像素格式，对 mp4/h264 很重要
+                "-y",                      # 覆盖已有文件
+            ]
+            
+            # 添加编码器特定参数
+            codec_params = [
+                "-c:v", video_codec,
+            ]
+            if ffmpeg_preset:
+                codec_params.extend(["-preset", ffmpeg_preset])
+            
+            # webm 特有参数 (之前的参数)
+            if video_codec == "libvpx":
+                 codec_params.extend([
+                    "-b:v", "2000k",
+                    "-cpu-used", "0",      # VP8/VP9 特定参数
+                    "-auto-alt-ref", "1",
+                    "-deadline", "good",
+                    "-threads", "4",
+                 ])
+            # mp4 (h264) 通常不需要这么多参数，preset 已经包含很多优化
+            # 可以根据需要添加 -crf (Constant Rate Factor) 来控制质量/大小平衡
+            # 例如: codec_params.extend(["-crf", "23"]) # 默认值，较低=更好质量
+
+            # 根据捕获方法构建最终命令
             if self.capture_method == "fb":
-                # 使用framebuffer捕获方法，尝试解决黑屏问题
-                print("使用framebuffer捕获方法，尝试解决黑屏问题")
+                # 使用framebuffer捕获方法 (保持不变，但注意可能不兼容所有格式)
+                print("使用framebuffer捕获方法")
                 cmd = [
                     "ffmpeg",
-                    "-f", "fbdev",            # 使用framebuffer设备
-                    "-framerate", "10",        # 设置帧率
-                    "-i", "/dev/fb0",          # framebuffer设备路径
-                    "-pix_fmt", "yuv420p",     # 输出像素格式
-                    "-y",                      # 覆盖已有文件
+                    "-f", "fbdev",
+                    "-framerate", "10",
+                    "-i", "/dev/fb0",
+                    "-pix_fmt", "yuv420p", # 确保像素格式
+                    # FB可能不支持所有高级编码器选项，这里保持简单
+                    "-c:v", video_codec, # 使用选择的编码器
+                    "-y",
                     self.output_path
                 ]
             elif self.capture_method == "xcb":
-                print("使用XCB捕获方法，解决黑屏问题")
-                cmd = [
-                    "ffmpeg",
-                    "-f", "x11grab",           # 仍使用x11grab，但加入XFixes扩展支持
-                    "-draw_mouse", "1",        # 启用鼠标绘制
-                    "-s", self._get_screen_resolution(),  # 设置分辨率
-                    "-i", ":0.0+0,0",          # 捕获主显示器，指定偏移
-                    "-vsync", "1",             # 视频同步
-                    "-r", "10",                # 帧率10fps
-                    "-c:v", "libvpx",          # 使用VP8编码
-                    "-b:v", "2000k",           # 增加比特率  
-                    "-pix_fmt", "yuv420p",     # 使用标准像素格式
-                    "-deadline", "good",       # 使用更好的质量设置
-                    "-threads", "4",           # 增加线程数
-                    "-y",                      # 覆盖已有文件
-                    self.output_path
-                ]
-            else:
+                print("使用XCB捕获方法")
+                # XCB 和 X11grab 基本参数类似
+                cmd = base_cmd_x11 + codec_params + movflags + [self.output_path]
+            else: # 默认 x11grab
                 print("使用X11捕获方法")
-                cmd = [
-                    "ffmpeg",
-                    "-f", "x11grab",           # 使用x11grab捕获X11显示
-                    "-draw_mouse", "1",        # 启用鼠标绘制
-                    "-s", self._get_screen_resolution(),  # 设置分辨率
-                    "-i", ":0.0+0,0",          # 捕获主显示器，指定偏移
-                    "-r", "10",                # 帧率10fps
-                    "-c:v", "libvpx",          # 使用VP8编码
-                    "-b:v", "2000k",           # 增加比特率
-                    "-pix_fmt", "yuv420p",     # 使用标准像素格式
-                    "-cpu-used", "0",          # 优化质量而非速度
-                    "-auto-alt-ref", "1",      # 启用替代参考帧
-                    "-deadline", "good",       # 使用更好的质量设置
-                    "-threads", "4",           # 增加线程数
-                    "-y",                      # 覆盖已有文件
-                    self.output_path
-                ]
+                cmd = base_cmd_x11 + codec_params + movflags + [self.output_path]
             
             # 增加调试输出
             print(f"屏幕录制命令: {' '.join(cmd)}")
@@ -219,11 +267,11 @@ class SystemRecorder:
 # 全局录制器实例
 recorder = None
 
-def start_system_recording(format="webm", capture_method="xcb"):
+def start_system_recording(format="mkv", capture_method="xcb"):
     """启动系统录制
     
     Args:
-        format: 视频格式，可选"mp4"、"avi"、"mkv"或"webm"，默认使用webm（最兼容）
+        format: 视频格式，可选"mp4"、"avi"、"mkv"或"webm"，默认使用mkv
         capture_method: 屏幕捕获方法，可选"x11"、"xcb"或"fb"，默认使用"xcb"解决黑屏问题
     """
     global recorder
@@ -260,12 +308,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.action == "start":
-        start_system_recording()
+        start_system_recording(format="mkv")
     elif args.action == "stop":
         stop_system_recording()
     elif args.action == "record":
         print(f"开始录制，将持续{args.duration}秒...")
-        start_system_recording()
+        start_system_recording(format="mkv")
         time.sleep(args.duration)
         stop_system_recording()
         print("录制完成！") 

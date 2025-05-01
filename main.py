@@ -658,7 +658,7 @@ class MainWindow(QMainWindow):
 
 def main():
     # 启动屏幕录制
-    start_screen_recording(format="webm", capture_method="xcb")  # 使用WebM格式和XCB捕获方法，确保兼容性
+    start_screen_recording(format="mkv", capture_method="xcb")  # 使用mkv格式和XCB捕获方法，提供更好的断电恢复能力
     
     # 注册程序退出时的回调，确保录制停止
     atexit.register(stop_screen_recording)
