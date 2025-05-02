@@ -76,7 +76,7 @@ DartSystem/
 
 ### 安装依赖
 ```bash
-pip install -r requirements.test.txt
+pip install -r requirements.test.txt.md
 ```
 
 ### 运行系统

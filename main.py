@@ -1,4 +1,6 @@
 import sys
+import yaml
+import os
 import cv2
 import numpy as np
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QPushButton
@@ -178,8 +180,11 @@ def set_Value(cam, param_type="float_value", node_name="", node_value=0):
             print("设置参数 %s 失败! ret[0x%x]" % (node_name, ret))
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, camera_config=None):
         super().__init__()
+        
+        # 存储相机配置
+        self.camera_config = camera_config
         
         # 初始化变量
         self.camera = None
@@ -244,9 +249,24 @@ class MainWindow(QMainWindow):
             print("打开设备失败! ret[0x%x]" % ret)
             return
 
-        # 设置相机参数
-        set_Value(self.camera, "float_value", "ExposureTime", 16000)  # 曝光时间
-        set_Value(self.camera, "float_value", "Gain", 15.9)  # 增益值
+        # 设置相机参数，使用配置文件的值
+        if self.camera_config and 'exposure' in self.camera_config:
+            exposure = self.camera_config['exposure']
+            print(f"使用配置文件设置曝光时间: {exposure}")
+            set_Value(self.camera, "float_value", "ExposureTime", exposure)
+        else:
+            # 使用默认值
+            print("使用默认曝光时间: 16000")
+            set_Value(self.camera, "float_value", "ExposureTime", 16000)
+
+        if self.camera_config and 'gain' in self.camera_config:
+            gain = self.camera_config['gain']
+            print(f"使用配置文件设置增益值: {gain}")
+            set_Value(self.camera, "float_value", "Gain", gain)
+        else:
+            # 使用默认值
+            print("使用默认增益值: 15.9")
+            set_Value(self.camera, "float_value", "Gain", 15.9)
 
         # 开始取流
         ret = self.camera.MV_CC_StartGrabbing()
@@ -657,6 +677,23 @@ class MainWindow(QMainWindow):
                 self.last_serial_update_time = time.time()
 
 def main():
+    # 加载配置文件
+    config = None
+    try:
+        with open('config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+        print("成功加载配置文件")
+    except FileNotFoundError:
+        print("警告：未找到配置文件'config.yaml'，将使用默认参数")
+    except yaml.YAMLError as e:
+        print(f"错误：解析配置文件时出错，{str(e)}")
+        sys.exit(1)
+    
+    # 检查配置是否有效
+    if not config or 'camera' not in config:
+        print("警告：无效的配置，将使用默认参数")
+        config = {'camera': {'exposure': 16000.0, 'gain': 15.9}}
+    
     # 启动屏幕录制
     start_screen_recording(format="mkv", capture_method="xcb")  # 使用mkv格式和XCB捕获方法，提供更好的断电恢复能力
     
@@ -664,7 +701,7 @@ def main():
     atexit.register(stop_screen_recording)
     
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(camera_config=config['camera'])
     window.show()
     sys.exit(app.exec())
 
