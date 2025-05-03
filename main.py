@@ -148,7 +148,7 @@ class SerialCommunication(QObject):
     def close(self):
         """关闭串口连接"""
         self.stop()
-
+    
 def get_Value(cam, param_type="float_value", node_name=""):
     """获取相机参数"""
     if param_type == "float_value":
@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
         
         # 存储相机配置
         self.camera_config = camera_config
+        # 保存全局配置引用
+        self.config = config
         
         # 初始化变量
         self.camera = None
@@ -289,46 +291,109 @@ class MainWindow(QMainWindow):
 
     def setup_serial(self):
         """初始化串口通信，使用多线程处理"""
-        try:
-            # 优先尝试连接主串口
-            primary_port = '/dev/my_stm32'
-            backup_ports = ['/dev/ttyACM0', '/dev/ttyACM1']
-            
-            # 创建串口接收对象，使用SerialReceiver类
-            self.serial_comm = SerialReceiver(port=primary_port, baudrate=115200)
-            
-            # 连接信号与槽
-            self.serial_comm.data_received.connect(self.update_serial_data_ui)
-            
-            # 启动线程
-            self.serial_comm.start()
-            
-            # 添加状态帧计数器
-            self.status_frame_counter = 0
-            print(f"串口接收线程已启动，使用端口：{primary_port}")
-            
-        except Exception as e:
-            print(f"主串口初始化失败: {str(e)}")
-            
-            # 如果主串口失败，尝试备用端口
-            for port in backup_ports:
-                try:
-                    self.serial_comm = SerialReceiver(port=port, baudrate=115200)
-                    self.serial_comm.data_received.connect(self.update_serial_data_ui)
-                    
-                    # 启动线程
-                    self.serial_comm.start()
-                    
-                    # 添加状态帧计数器
-                    self.status_frame_counter = 0
-                    print(f"使用备用串口初始化成功，使用端口：{port}")
-                    break
-                except Exception as backup_err:
-                    print(f"备用串口 {port} 初始化失败: {str(backup_err)}")
+        # 从配置中获取串口配置
+        serial_config = self.config.get('serial', {})
+        # 获取主串口，默认为'/dev/backup_stm32'
+        primary_port = serial_config.get('primary_port', '/dev/backup_stm32')
+        # 获取波特率，默认为115200
+        baudrate = serial_config.get('baudrate', 115200)
+        # 获取备用串口列表，默认为['/dev/ttyACM0', '/dev/ttyACM1']
+        backup_ports = serial_config.get('backup_ports', ['/dev/ttyACM0', '/dev/ttyACM1'])
+        
+        # 创建要尝试的端口列表，首先是主端口，然后是备用端口
+        ports_to_try = [primary_port] + backup_ports
+        
+        # 移除重复的端口，保持顺序
+        unique_ports = []
+        for port in ports_to_try:
+            if port not in unique_ports:
+                unique_ports.append(port)
+        
+        # 首先检查哪些端口存在
+        available_ports = []
+        for port in unique_ports:
+            if os.path.exists(port):
+                available_ports.append(port)
             else:
-                # 所有端口都尝试失败
-                print("所有串口尝试都失败，无法初始化串口通信")
-                self.serial_comm = None
+                print(f"端口 {port} 不存在，跳过尝试")
+        
+        # 如果没有可用端口，尝试查找系统上可能的串口设备
+        if not available_ports:
+            print("没有找到配置的串口设备，尝试搜索可能的串口设备...")
+            # 搜索ttyACM、ttyUSB设备
+            possible_ports = []
+            for pattern in ['/dev/ttyACM*', '/dev/ttyUSB*']:
+                import glob
+                possible_ports.extend(glob.glob(pattern))
+            
+            if possible_ports:
+                print(f"找到以下可能的串口设备: {possible_ports}")
+                available_ports = possible_ports
+            else:
+                print("没有找到任何可用的串口设备")
+        
+        # 尝试连接每个可用端口
+        for port in available_ports:
+            try:
+                print(f"尝试连接串口: {port}")
+                self.serial_comm = SerialReceiver(port=port, baudrate=baudrate)
+                self.serial_comm.data_received.connect(self.update_serial_data_ui)
+                
+                # 启动线程
+                self.serial_comm.start()
+                
+                # 添加状态帧计数器
+                self.status_frame_counter = 0
+                print(f"串口连接成功，使用端口：{port}")
+                
+                # 更新连接状态标签
+                self.connection_status_label.setText(f"连接状态: 已连接 ({port})")
+                
+                # 设置一个定时器，每5秒检查一次串口连接状态
+                self.connection_timer = QTimer()
+                self.connection_timer.timeout.connect(self.check_serial_connection)
+                self.connection_timer.start(5000)  # 5000毫秒 = 5秒
+                
+                # 成功连接，退出循环
+                return
+            except Exception as e:
+                print(f"串口 {port} 初始化失败: {str(e)}")
+                continue
+        
+        # 所有端口都尝试失败
+        print("所有串口尝试都失败，无法初始化串口通信")
+        self.serial_comm = None
+        self.connection_status_label.setText("连接状态: 未连接")
+        
+        # 设置一个定时器，每10秒重试一次连接
+        self.retry_timer = QTimer()
+        self.retry_timer.timeout.connect(self.retry_serial_connection)
+        self.retry_timer.start(10000)  # 10000毫秒 = 10秒
+
+    def check_serial_connection(self):
+        """检查串口连接状态，如果断开则尝试重新连接"""
+        if self.serial_comm is None or not self.serial_comm.serial or not self.serial_comm.serial.is_open:
+            print("串口连接已断开，尝试重新连接...")
+            self.connection_status_label.setText("连接状态: 已断开，正在重连...")
+            self.retry_serial_connection()
+        else:
+            # 连接正常，更新状态显示
+            port = self.serial_comm.port if hasattr(self.serial_comm, 'port') else "未知"
+            self.connection_status_label.setText(f"连接状态: 已连接 ({port})")
+
+    def retry_serial_connection(self):
+        """重试串口连接"""
+        print("重试串口连接...")
+        # 先关闭现有连接（如果有）
+        if self.serial_comm is not None:
+            self.serial_comm.stop()
+            self.serial_comm = None
+        
+        # 更新连接状态标签
+        self.connection_status_label.setText("连接状态: 正在重新连接...")
+        
+        # 重新设置串口
+        self.setup_serial()
 
     def update_connection_status(self, connected):
         """更新串口连接状态 - 仅保留兼容性，SerialReceiver不使用"""
@@ -585,6 +650,14 @@ class MainWindow(QMainWindow):
         # 停止定时器
         if hasattr(self, 'fps_timer'):
             self.fps_timer.stop()
+            
+        # 停止串口连接检查定时器
+        if hasattr(self, 'connection_timer'):
+            self.connection_timer.stop()
+            
+        # 停止串口重试定时器
+        if hasattr(self, 'retry_timer'):
+            self.retry_timer.stop()
         
         # 关闭相机
         if hasattr(self, 'camera') and self.camera is not None:
@@ -678,6 +751,7 @@ class MainWindow(QMainWindow):
 
 def main():
     # 加载配置文件
+    global config  # 声明为全局变量
     config = None
     try:
         with open('config.yaml', 'r') as f:
@@ -690,9 +764,22 @@ def main():
         sys.exit(1)
     
     # 检查配置是否有效
-    if not config or 'camera' not in config:
-        print("警告：无效的配置，将使用默认参数")
-        config = {'camera': {'exposure': 16000.0, 'gain': 15.9}}
+    if not config:
+        config = {}
+    
+    # 确保camera配置存在
+    if 'camera' not in config:
+        print("警告：未找到相机配置，将使用默认参数")
+        config['camera'] = {'exposure': 16000.0, 'gain': 15.9}
+    
+    # 确保serial配置存在
+    if 'serial' not in config:
+        print("警告：未找到串口配置，将使用默认参数")
+        config['serial'] = {
+            'primary_port': '/dev/backup_stm32',
+            'baudrate': 115200,
+            'backup_ports': ['/dev/ttyACM0', '/dev/ttyACM1']
+        }
     
     # 启动屏幕录制
     start_screen_recording(format="mkv", capture_method="xcb")  # 使用mkv格式和XCB捕获方法，提供更好的断电恢复能力
