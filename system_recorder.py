@@ -168,7 +168,8 @@ class SystemRecorder:
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                text=True # 添加这个参数，使输出为文本格式
             )
             
             self.recording = True
@@ -185,6 +186,9 @@ class SystemRecorder:
             print("没有正在进行的录制")
             return
         
+        ffmpeg_stdout = ""
+        ffmpeg_stderr = ""
+
         try:
             print("正在停止录制...")
             
@@ -192,26 +196,39 @@ class SystemRecorder:
                 # 向进程发送中断信号
                 self.process.send_signal(signal.SIGINT)
                 
-                # 等待进程结束
+                # 等待进程结束并获取输出
                 try:
                     print("等待ffmpeg完成视频文件...")
-                    # 增加等待时间以确保ffmpeg能完成文件写入
-                    self.process.wait(timeout=10)
+                    ffmpeg_stdout, ffmpeg_stderr = self.process.communicate(timeout=15) # 增加超时并获取输出
+                    print(f"ffmpeg 退出码: {self.process.returncode}")
+                    if ffmpeg_stdout:
+                        print(f"ffmpeg stdout:\n{ffmpeg_stdout}")
+                    if ffmpeg_stderr:
+                        print(f"ffmpeg stderr:\n{ffmpeg_stderr}")
+
                     print(f"录制已停止，视频已保存到: {self.output_path}")
                     print(f"绝对路径: {os.path.abspath(self.output_path)}")
                     
-                    # 验证生成的文件
                     self._verify_video_file()
                 except subprocess.TimeoutExpired:
-                    print("警告: ffmpeg没有及时响应，尝试使用SIGTERM信号")
-                    # 先尝试SIGTERM，这是更温和的终止方式
+                    print("警告: ffmpeg没有及时响应 SIGINT，尝试使用SIGTERM信号")
                     self.process.send_signal(signal.SIGTERM)
                     try:
-                        self.process.wait(timeout=5)
+                        ffmpeg_stdout, ffmpeg_stderr = self.process.communicate(timeout=10) # 再次尝试获取输出
+                        print(f"ffmpeg 退出码: {self.process.returncode}")
+                        if ffmpeg_stdout:
+                            print(f"ffmpeg stdout (after SIGTERM):\n{ffmpeg_stdout}")
+                        if ffmpeg_stderr:
+                            print(f"ffmpeg stderr (after SIGTERM):\n{ffmpeg_stderr}")
                     except subprocess.TimeoutExpired:
-                        print("警告: ffmpeg仍未响应，强制终止")
+                        print("警告: ffmpeg仍未响应 SIGTERM，强制终止")
                         self.process.kill()
-                        self.process.wait()
+                        ffmpeg_stdout, ffmpeg_stderr = self.process.communicate() # 获取最后输出
+                        print(f"ffmpeg 退出码 (after SIGKILL): {self.process.returncode}")
+                        if ffmpeg_stdout:
+                            print(f"ffmpeg stdout (after SIGKILL):\n{ffmpeg_stdout}")
+                        if ffmpeg_stderr:
+                            print(f"ffmpeg stderr (after SIGKILL):\n{ffmpeg_stderr}")
             
             # 重置状态
             self.recording = False
@@ -219,6 +236,10 @@ class SystemRecorder:
             
         except Exception as e:
             print(f"停止录制时出错: {e}")
+            if ffmpeg_stdout: # 即使出错也尝试打印已捕获的输出
+                print(f"ffmpeg stdout (on error):\n{ffmpeg_stdout}")
+            if ffmpeg_stderr:
+                print(f"ffmpeg stderr (on error):\n{ffmpeg_stderr}")
     
     def _verify_video_file(self):
         """验证生成的视频文件是否有效"""

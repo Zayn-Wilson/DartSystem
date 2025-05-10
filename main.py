@@ -11,7 +11,7 @@ import time
 import atexit
 import serial
 import struct
-
+#赛场 版本
 from opencv_green_detection import create_trackbars, get_trackbar_values, detect_green_light_and_offset, detector
 # from serial_communication import SerialCommunication
 # from screen_recorder import start_screen_recording, stop_screen_recording

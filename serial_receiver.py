@@ -3,7 +3,7 @@ import struct
 import time
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from PyQt6.QtWidgets import QApplication
-
+#赛场
 class SerialReceiver(QThread):
     data_received = pyqtSignal(float, float)  # 定义信号，传递 angle 和 count
 

@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from collections import deque
-
+#识别
 # 全局变量声明
 GUI_AVAILABLE = False  # 默认为False，将在create_trackbars中尝试创建窗口时更新
 DEFAULT_HSV_VALUES = {
